@@ -22,6 +22,7 @@ class Constrain(object):
             pymel.parentConstraint(
                 source,
                 target,
+                maintainOffset=True,
                 skipRotate=self._get_axes_skip(),
                 skipTranslate=self._get_axes_skip()
             )
@@ -29,18 +30,21 @@ class Constrain(object):
             pymel.pointConstraint(
                 source,
                 target,
+                maintainOffset=True,
                 skip=self._get_axes_skip()
             )
         elif self.constrain == ConstrainEnum.ORIENT_CONSTRAIN:
             pymel.orientConstraint(
                 source,
                 target,
+                maintainOffset=True,
                 skip=self._get_axes_skip()
             )
         elif self.constrain == ConstrainEnum.SCALE_CONSTRAIN:
             pymel.scaleConstraint(
                 source,
                 target,
+                maintainOffset=True,
                 skip=self._get_axes_skip()
             )
 
@@ -89,7 +93,7 @@ class ConstrainsMatchingTool(object):
     def _init_class_var(self):
         self.window = "CM_Window"
         self.title = "Constraints creator"
-        self.windowSize = (900, 800)
+        self.windowSize = (700,800)
         self.targetUIList = []
 
     def _create_windows_fields(self):
@@ -132,7 +136,7 @@ class ConstrainsMatchingTool(object):
         self.scrollLayout = pymel.scrollLayout(
             parent=self.mainLayout,
             childResizable=True,
-            height=725,
+            height=500,
         )
 
         self.applyAnimationButton = pymel.button(
