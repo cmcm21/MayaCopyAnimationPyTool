@@ -1,4 +1,5 @@
 import pymel.core as pymel
+from maya.api import OpenMaya
 from enum import Enum
 import json
 
@@ -8,6 +9,10 @@ class ConstrainEnum(Enum):
     POINT_CONSTRAIN = 1
     ORIENT_CONSTRAIN = 2
     SCALE_CONSTRAIN = 3
+    PARENT_NODE = "parentConstraint"
+    POINT_NODE = "pointConstraint"
+    ORIENT_NODE = "orientConstraint"
+    SCALE_NODE = "scaleConstraint"
 
 
 class Constrain(object):
@@ -17,11 +22,10 @@ class Constrain(object):
         self.skipX = False
         self.skipY = False
         self.skipZ = False
-        self.constraint = None
 
     def apply(self, source, target):
         if self.constrainEnum == ConstrainEnum.PARENT_CONSTRAIN:
-            self.constraint = pymel.parentConstraint(
+            pymel.parentConstraint(
                 source,
                 target,
                 maintainOffset=True,
@@ -29,21 +33,21 @@ class Constrain(object):
                 skipTranslate=self._get_axes_skip()
             )
         elif self.constrainEnum == ConstrainEnum.POINT_CONSTRAIN:
-            self.constraint = pymel.pointConstraint(
+            pymel.pointConstraint(
                 source,
                 target,
                 maintainOffset=True,
                 skip=self._get_axes_skip()
             )
         elif self.constrainEnum == ConstrainEnum.ORIENT_CONSTRAIN:
-            self.constraint = pymel.orientConstraint(
+            pymel.orientConstraint(
                 source,
                 target,
                 maintainOffset=True,
                 skip=self._get_axes_skip()
             )
         elif self.constrainEnum == ConstrainEnum.SCALE_CONSTRAIN:
-            self.constraint = pymel.scaleConstraint(
+            pymel.scaleConstraint(
                 source,
                 target,
                 maintainOffset=True,
@@ -76,6 +80,32 @@ class Constrain(object):
     def get_axes_tuple(self) -> (bool, bool, bool):
         return self.skipX, self.skipY, self.skipZ
 
+    def get_serialized_dict(self) -> dict:
+        return {
+            "constraint": self.constrainEnum.value,
+            "x": self.skipX,
+            "y": self.skipY,
+            "z": self.skipZ
+        }
+
+    def __str__(self):
+        return "constraint: {}, skip axes[ x:{}, y:{}, z:{} ]".format(
+            self.constrainEnum.value,
+            self.skipX,
+            self.skipY,
+            self.skipZ
+        )
+
+
+class ConstrainSerialized(Constrain):
+
+    def __init__(self, serialized_data: dict):
+        constrain_enum = ConstrainEnum(int(serialized_data['constraint']))
+        Constrain.__init__(self, constrain_enum)
+        self.skipX = serialized_data['x']
+        self.skipY = serialized_data['y']
+        self.skipZ = serialized_data['z']
+
 
 class JsonDataManager(object):
     def __init__(self):
@@ -83,34 +113,45 @@ class JsonDataManager(object):
         self.sourcesKey = "sources"
         self.targetsKey = "targets"
         self.constraintsKey = "constraints"
-
+        self.dataDeserialized = {}
         return
 
     def set_data(self, sources: list, targets: list, constraints: list):
         if len(sources) != len(targets) or len(targets) != len(constraints):
             return
 
+        print(sources)
+        print(targets)
+        print(constraints)
+
         self.data = {
             self.sourcesKey: sources,
             self.targetsKey: targets,
-            self.constraintsKey: constraints
+            self.constraintsKey: self._serialize_constraints_data(constraints)
         }
+
+        print(self.data)
 
     def save(self, file_name):
         if file_name is None:
+            print("++++ Invalid File : {} it couldn't be saved".format(file_name))
             return
 
         with open(file_name, "w") as save_file:
             json.dump(self.data, save_file)
 
+        print("++++ File {} saved ++++".format(file_name))
+
     def load(self, file_name) -> bool:
         if file_name is None:
+            print("++++ Invalid File : {} it couldn't be loaded".format(file_name))
             return False
 
         with open(file_name, "r") as load_file:
             data = json.load(load_file)
             if self._check_correct_format(data):
                 self.data = data
+                print("++++ File {} Loading ++++".format(file_name))
                 return True
             else:
                 return False
@@ -130,10 +171,35 @@ class JsonDataManager(object):
         else:
             key = ""
 
-        if key in self.data.keys():
+        if key == self.constraintsKey:
+            return self._deserialized_constraints_data(self.data[key])
+        elif key in self.data.keys():
             return self.data[key]
         else:
             return []
+
+    @staticmethod
+    def _serialize_constraints_data(constraints: list) -> list:
+        constraints_serialized = [{} for i in range(len(constraints))]
+        key:ConstrainEnum
+        value:Constrain
+        for i in range(len(constraints)):
+            if len(constraints[i]) > 0:
+                for key, value in constraints[i].items():
+                    constraints_serialized[i][key.value] = value.get_serialized_dict()
+
+        return constraints_serialized
+
+    @staticmethod
+    def _deserialized_constraints_data(constraints: list) -> list:
+        constraints_deserialized = [{} for i in range(len(constraints))]
+        for i in range(len(constraints)):
+            for key, value in constraints[i].items():
+                if len(constraints[i][key]) > 0:
+                    constraint_enum_key = ConstrainEnum(int(key))
+                    constraints_deserialized[i][constraint_enum_key] = ConstrainSerialized(value)
+
+        return constraints_deserialized
 
 
 class ConstrainsMatchingTool(object):
@@ -163,7 +229,7 @@ class ConstrainsMatchingTool(object):
         self.sourceChildren = []
         self.targetList = []
         self.constraints = []
-        self.sourceObjectName = None
+        self.sourceObject = None
 
     def _create_windows_fields(self):
         self._create_source_section()
@@ -225,7 +291,7 @@ class ConstrainsMatchingTool(object):
         ))
         self.targetUIList.append(pymel.separator(parent=self.mainLayout))
         self.targetUIList.append(pymel.button(
-            label="Delete constraints",
+            label="Delete all constraints in scene",
             parent=self.mainLayout,
             command=self._delete_constraints
         ))
@@ -244,19 +310,22 @@ class ConstrainsMatchingTool(object):
         if len(selected_list) == 0:
             return
 
-        self.sourceObjectName = selected_list[0]
-        pymel.textFieldGrp(self.sourceTextfield, edit=True, text=self.sourceObjectName, editable=False)
+        self.sourceObject = selected_list[0]
+        pymel.textFieldGrp(self.sourceTextfield, edit=True, text=self.sourceObject, editable=False)
         return
 
     def _get_children_from_source(self, *args):
-        if self.sourceObjectName is None:
+        if self.sourceObject is None or self.sourceObject == "":
             return
 
-        self.sourceChildren = pymel.listRelatives(self.sourceObjectName, allDescendents=True)
-        self.sourceChildren.append(self.sourceObjectName)
+        source_nodes = pymel.listRelatives(self.sourceObject, allDescendents=True)
+        self.sourceChildren = [source.name() for source in source_nodes]
+        self.sourceChildren.append(self.sourceObject.name())
         self.sourceChildren.reverse()
 
         self.targetList = [""] * len(self.sourceChildren)
+        # we can't use the same initialization for a list of dictionaries, if we do it, dictionaries will share
+        # the same memory address
         self.constraints = [{} for i in range(len(self.sourceChildren))]
 
         self._display_matching_source_x_target()
@@ -285,7 +354,7 @@ class ConstrainsMatchingTool(object):
         return
 
     def _create_source_column(self, layout, index: int):
-        source_name = self.sourceChildren[index].name()
+        source_name = self.sourceChildren[index]
         row_layout = pymel.columnLayout(parent=layout, adjustableColumn=True)
 
         source_text_field = pymel.textFieldGrp(
@@ -323,12 +392,12 @@ class ConstrainsMatchingTool(object):
         self.sourceXTargetLayouts.clear()
 
     def _create_target_column(self, layout, index: int):
-        self.targetLayout = pymel.columnLayout(parent=layout, adjustableColumn=True)
+        target_layout = pymel.columnLayout(parent=layout, adjustableColumn=True)
 
         target = self.targetList[index]
         target_text_field = pymel.textFieldButtonGrp(
             label="Target :",
-            parent=self.targetLayout,
+            parent=target_layout,
             editable=True,
             text=target,
             buttonLabel="Get selected",
@@ -336,10 +405,10 @@ class ConstrainsMatchingTool(object):
         )
         target_delete_button = pymel.button(
             label="Delete target",
-            parent=self.targetLayout,
+            parent=target_layout,
             command=lambda *args: self._delete_target(index)
         )
-        self._create_constrains_checkbox(self.targetLayout, index)
+        self._create_constrains_checkbox(target_layout, index)
         return
 
     def _delete_target(self, index):
@@ -374,7 +443,7 @@ class ConstrainsMatchingTool(object):
             onCommand=lambda *args: self._create_constrain_axes(index, constrain_enum),
             offCommand=lambda *args: self._delete_constrain(index, constrain_enum)
         )
-        axes = self._get_axes_values(index, constrain_enum)
+        axes = [False,False,False] if not constrain_value else self.constraints[index][constrain_enum].get_axes_tuple()
         axes_checkbox = pymel.checkBoxGrp(
             parent=row_layout,
             numberOfCheckBoxes=3,
@@ -390,21 +459,15 @@ class ConstrainsMatchingTool(object):
         )
         return check_box
 
-    def _get_axes_values(self, index, constrain_enum) -> (bool, bool, bool):
-        if constrain_enum in self.constraints[index]:
-            constraint: Constrain = self.constraints[index][constrain_enum]
-            return constraint.get_axes_tuple()
-        else:
-            return False, False, False
-
-    def _delete_constrain(self, index, constrain_enum):
-        if constrain_enum in self.constraints[index]:
+    def _delete_constrain(self, index, constrain_enum: ConstrainEnum):
+        if constrain_enum.value in self.constraints[index]:
             self.constraints[index].pop(constrain_enum)
         return
 
     def _create_constrain_axes(self, index, constrain_enum: ConstrainEnum):
+        if constrain_enum in self.constraints[index].keys():
+            return
         self.constraints[index][constrain_enum] = Constrain(constrain_enum)
-        return
 
     def _update_constrain_axes(self, index: int, constrain_enum: ConstrainEnum, skip_axe: str, value: bool):
         if constrain_enum in self.constraints[index].keys():
@@ -430,8 +493,6 @@ class ConstrainsMatchingTool(object):
             for constrain in self.constraints[i].values():
                 constrain.apply(source, target)
 
-        self._clear_UI()
-
     def _clear_UI(self, *args):
         for ui in self.targetUIList:
             pymel.deleteUI(ui)
@@ -441,20 +502,27 @@ class ConstrainsMatchingTool(object):
         self.targetList.clear()
         self.constraints.clear()
         self.sourceXTargetLayouts.clear()
+        pymel.textFieldGrp(self.sourceTextfield,edit=True,text="")
 
         self._create_target_section()
         return
 
-    def _delete_constraints(self,*args):
-        if not self._validate_self_data():
-            return
+    @staticmethod
+    def _delete_constraints(*args):
+        constraints = [
+            pymel.ls(type=ConstrainEnum.PARENT_NODE.value),
+            pymel.ls(type=ConstrainEnum.ORIENT_NODE.value),
+            pymel.ls(type=ConstrainEnum.SCALE_NODE.value),
+            pymel.ls(type=ConstrainEnum.POINT_NODE.value)
+        ]
 
-        for i in range(len(self.constraints)):
-            constraint:Constrain = self.constraints[i]
-            pymel.delete(constraint.constraint)
+        for constraints_type in constraints:
+            for constraint in constraints_type:
+                pymel.delete(constraint)
+
         print("++++ constraints deleted ++++")
 
-    def _save_as_json(self,*args):
+    def _save_as_json(self, *args):
         if not self._validate_self_data():
             print("There is no constraints configuration to save")
             return
@@ -464,9 +532,10 @@ class ConstrainsMatchingTool(object):
             dialogStyle=2
         )
 
-        data = JsonDataManager()
-        data.set_data(self.sourceChildren,self.targetList,self.constraints)
-        data.save(save_file)
+        if save_file is not None and len(save_file) > 0:
+            data = JsonDataManager()
+            data.set_data(self.sourceChildren, self.targetList, self.constraints)
+            data.save(save_file[0])
 
     def _load_json(self, *args):
         load_file = pymel.fileDialog2(
@@ -474,26 +543,60 @@ class ConstrainsMatchingTool(object):
             fileMode=1,
             dialogStyle=2
         )
+        if load_file is None or len(load_file) == 0:
+            return
+
         data = JsonDataManager()
-        if data.load(load_file):
+        if data.load(load_file[0]):
             self.targetList = data.get_data("t")
             self.constraints = data.get_data("c")
             self.sourceChildren = data.get_data("s")
-            if self._validate_self_data():
+
+            if self._validate_self_data() and self._validate_self_constraints():
                 self._display_matching_source_x_target()
             else:
                 print("++++++++ json format error ++++++++")
         else:
-            print("++++ error trying to read json occurred ++++")
+            print("++++ an error trying to read json file has occurred ++++")
         return
 
-    def _validate_self_data(self):
+    def _validate_self_data(self) -> bool:
         return len(self.targetList) > 0 and len(self.constraints) > 0 and len(self.sourceChildren) > 0
 
+    def _validate_self_constraints(self) -> bool:
+        return_value = True
+        for i in range(len(self.constraints)):
+            if len(self.constraints[i]) > 0:
+                for key,value in self.constraints[i].items():
+                    if not isinstance(key,ConstrainEnum) or not isinstance(value,Constrain):
+                        return_value = False
+                        break
 
-def main():
-    constrains_tool = ConstrainsMatchingTool()
+        return return_value
 
 
-if __name__ == "__main__":
-    main()
+def create_matching_constraints_tool():
+    constraints_tool = ConstrainsMatchingTool()
+
+
+def create_shelf_button(layout):
+    pymel.shelfButton(
+        annotation='Constraints matching tool".',
+        parent=layout,
+        image1='commandButton.png',
+        command=create_matching_constraints_tool
+    )
+
+
+def initializePlugin(plugin):
+    workspace_layouts = pymel.workspaceLayoutManager(listLayouts=True)
+    animation = "Animation"
+    general = "General"
+    if animation in workspace_layouts:
+        create_shelf_button(animation)
+    elif general in workspace_layouts:
+        create_shelf_button(general)
+
+
+def uninitializePlugin(plugin):
+    return
